@@ -98,7 +98,8 @@ namespace ComputerMonitorService
                         department = configData.department,
                         lastUpdated = DateTime.UtcNow
                     };
-
+                    string statusUrl = $"https://{serverUrl}api/status";
+                    Log(statusUrl);
                     Log("Sending data to server...");
                     var content = new StringContent(JsonConvert.SerializeObject(computerInfo), System.Text.Encoding.UTF8, "application/json");
                     var response = await httpClient.PostAsync(serverUrl, content);
