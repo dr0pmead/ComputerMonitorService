@@ -1,15 +1,16 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Management;
+using System.Net;
+using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.ServiceProcess;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
-using System.Management;
-using System.Net;
-using System.Diagnostics;
-using System.IO;
-using System.Net.Http;
-using System.Threading;
 
 namespace ComputerMonitorService
 {
@@ -89,22 +90,30 @@ namespace ComputerMonitorService
                     var computerInfo = new
                     {
                         name = Environment.MachineName,
-                        ips = GetLocalIPAddresses(),
+                        ipAddress = GetLocalIPAddresses(),
                         components = GetHardwareInfo(),
-                        anydesk = GetAnyDeskId(),
-                        teamviewer = GetTeamViewerId(),
-                        status = "online",
+                        anyDesk = GetAnyDeskId(),
+                        teamViewer = GetTeamViewerId(),
+                        printer = GetDefaultPrinter(),
+                        online = true,
                         owner = configData.owner,
                         department = configData.department,
                         lastUpdated = DateTime.UtcNow
                     };
-                    string statusUrl = $"https://{serverUrl}api/status";
+
+                    string statusUrl = $"{serverUrl}/api/status";
                     Log(statusUrl);
                     Log("Sending data to server...");
-                    var content = new StringContent(JsonConvert.SerializeObject(computerInfo), System.Text.Encoding.UTF8, "application/json");
-                    var response = await httpClient.PostAsync(serverUrl, content);
+
+                    // Convert computerInfo to JSON and log it
+                    string computerInfoJson = JsonConvert.SerializeObject(computerInfo, Formatting.Indented);
+                    Log("Collected Computer Info:");
+                    Log(computerInfoJson);
+
+                    var content = new StringContent(computerInfoJson, System.Text.Encoding.UTF8, "application/json");
+                    var response = await httpClient.PostAsync(statusUrl, content);
                     response.EnsureSuccessStatusCode();
-                    Log($"Data sent successfully. IPs: {string.Join(", ", computerInfo.ips)}");
+                    Log($"Data sent successfully. IPs: {string.Join(", ", computerInfo.ipAddress)}");
 
                     Log("Waiting for next cycle...");
                     await Task.Delay(TimeSpan.FromSeconds(60), token); // Увеличено время ожидания до 60 секунд
@@ -153,7 +162,7 @@ namespace ComputerMonitorService
             {
                 Log("Getting local IP addresses...");
                 var host = Dns.GetHostEntry(Dns.GetHostName());
-                var ipList = new System.Collections.Generic.List<string>();
+                var ipList = new List<string>();
 
                 foreach (var ip in host.AddressList)
                 {
@@ -179,7 +188,7 @@ namespace ComputerMonitorService
 
         private dynamic GetHardwareInfo()
         {
-            var components = new System.Collections.Generic.List<dynamic>();
+            var components = new List<dynamic>();
 
             try
             {
@@ -195,29 +204,64 @@ namespace ComputerMonitorService
                 }
 
                 searcher = new ManagementObjectSearcher("select * from Win32_PhysicalMemory");
+                var memoryInfo = new Dictionary<string, ulong>();
                 foreach (var obj in searcher.Get())
                 {
                     ulong capacity = Convert.ToUInt64(obj["Capacity"]);
-                    uint speed = Convert.ToUInt32(obj["Speed"]);
-                    string memoryType = GetMemoryType(speed);
+                    string manufacturer = obj["Manufacturer"].ToString();
 
+                    if (memoryInfo.ContainsKey(manufacturer))
+                    {
+                        memoryInfo[manufacturer] += capacity;
+                    }
+                    else
+                    {
+                        memoryInfo[manufacturer] = capacity;
+                    }
+                }
+
+                foreach (var item in memoryInfo)
+                {
                     components.Add(new
                     {
                         Type = "Memory",
-                        Name = memoryType,
-                        Quantity = (double)capacity / (1024 * 1024 * 1024) // Конвертируем в гигабайты
+                        Manufacturer = item.Key,
+                        Quantity = (double)item.Value / (1024 * 1024 * 1024) // Конвертируем в гигабайты
                     });
                 }
 
                 searcher = new ManagementObjectSearcher("select * from Win32_DiskDrive");
+                var diskToPartitions = new Dictionary<string, List<string>>();
+
                 foreach (var obj in searcher.Get())
                 {
+                    var diskName = obj["Model"].ToString();
+                    var diskSize = Convert.ToDouble(obj["Size"]);
+                    var partitions = GetPartitionsForDisk(obj["DeviceID"].ToString());
+
+                    diskToPartitions[diskName] = partitions;
+
                     components.Add(new
                     {
                         Type = "Disk",
-                        Name = obj["Model"].ToString(),
-                        Size = Convert.ToDouble(obj["Size"])
+                        Name = diskName,
+                        Size = diskSize / (1024 * 1024 * 1024), // Конвертируем в гигабайты
+                        FreeSpace = GetTotalFreeSpace(partitions) / (1024 * 1024 * 1024) // Конвертируем в гигабайты
                     });
+                }
+
+                searcher = new ManagementObjectSearcher("select * from Win32_VideoController");
+                foreach (var obj in searcher.Get())
+                {
+                    var videoName = obj["Name"].ToString();
+                    if (!videoName.Contains("Intel") && !videoName.Contains("Microsoft Basic Display Adapter") && !videoName.Contains("Radeon"))
+                    {
+                        components.Add(new
+                        {
+                            Type = "Video",
+                            Name = videoName
+                        });
+                    }
                 }
 
                 searcher = new ManagementObjectSearcher("select * from Win32_BaseBoard");
@@ -237,6 +281,36 @@ namespace ComputerMonitorService
                 Log($"Error getting hardware info: {ex.Message}");
                 throw;
             }
+        }
+
+        private List<string> GetPartitionsForDisk(string deviceId)
+        {
+            var partitions = new List<string>();
+
+            var searcher = new ManagementObjectSearcher($"associators of {{Win32_DiskDrive.DeviceID='{deviceId}'}} where AssocClass=Win32_DiskDriveToDiskPartition");
+            foreach (var obj in searcher.Get())
+            {
+                partitions.Add(obj["DeviceID"].ToString());
+            }
+
+            return partitions;
+        }
+
+        private double GetTotalFreeSpace(List<string> partitions)
+        {
+            double totalFreeSpace = 0;
+
+            foreach (var partition in partitions)
+            {
+                var searcher = new ManagementObjectSearcher($"associators of {{Win32_DiskPartition.DeviceID='{partition}'}} where AssocClass=Win32_LogicalDiskToPartition");
+                foreach (var obj in searcher.Get())
+                {
+                    var freeSpace = Convert.ToDouble(obj["FreeSpace"]);
+                    totalFreeSpace += freeSpace;
+                }
+            }
+
+            return totalFreeSpace;
         }
 
         private string GetMemoryType(uint speed)
@@ -298,6 +372,54 @@ namespace ComputerMonitorService
                 Log($"Error getting TeamViewer ID: {ex.Message}");
                 return "N/A";
             }
+        }
+
+        private dynamic GetDefaultPrinter()
+        {
+            try
+            {
+                Log("Getting default printer...");
+                var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_Printer WHERE Default = TRUE");
+
+                foreach (var obj in searcher.Get())
+                {
+                    var portName = obj["PortName"].ToString();
+                    var ipAddress = GetPrinterIpAddress(portName);
+
+                    return new
+                    {
+                        Name = obj["Name"].ToString(),
+                        PortName = portName,
+                        Default = (bool)obj["Default"],
+                        IpAddress = ipAddress
+                    };
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error getting default printer: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        private string GetPrinterIpAddress(string portName)
+        {
+            try
+            {
+                var searcher = new ManagementObjectSearcher($"SELECT * FROM Win32_TCPIPPrinterPort WHERE Name = '{portName}'");
+
+                foreach (var obj in searcher.Get())
+                {
+                    return obj["HostAddress"].ToString();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error getting printer IP address for port {portName}: {ex.Message}");
+            }
+
+            return "N/A";
         }
 
         private void Log(string message)
