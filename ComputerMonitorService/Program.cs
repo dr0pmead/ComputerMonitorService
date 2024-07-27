@@ -1,25 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+﻿using ComputerMonitorService;
 using System.ServiceProcess;
-using System.Text;
-using System.Threading.Tasks;
 
-namespace ComputerMonitorService
+public static class Program
 {
-    internal static class Program
+    public static void Main()
     {
-        /// <summary>
-        /// Главная точка входа для приложения.
-        /// </summary>
-        static void Main()
+        ServiceBase[] ServicesToRun;
+        ServicesToRun = new ServiceBase[]
         {
-            ServiceBase[] ServicesToRun;
-            ServicesToRun = new ServiceBase[]
-            {
-                new Service1()
-            };
-            ServiceBase.Run(ServicesToRun);
-        }
+            new Service1()
+        };
+        ServiceBase.Run(ServicesToRun);
     }
 }

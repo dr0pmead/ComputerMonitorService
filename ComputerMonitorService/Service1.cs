@@ -16,7 +16,7 @@ namespace ComputerMonitorService
 {
     public partial class Service1 : ServiceBase
     {
-        private string configFilePath = "C:\\Program Files (x86)\\Computer Monitor Service\\config.json"; // Путь к конфигурационному файлу
+        private string configFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
         private HttpClient httpClient;
         private CancellationTokenSource cancellationTokenSource;
         private Task sendComputerInfoTask;
@@ -101,7 +101,7 @@ namespace ComputerMonitorService
                         lastUpdated = DateTime.UtcNow
                     };
 
-                    string statusUrl = $"{serverUrl}/api/status";
+                    string statusUrl = $"https://{serverUrl}/api/status";
                     Log(statusUrl);
                     Log("Sending data to server...");
 
@@ -379,7 +379,53 @@ namespace ComputerMonitorService
             try
             {
                 Log("Getting default printer...");
-                var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_Printer WHERE Default = TRUE");
+                var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "wmic",
+                        Arguments = "printer get name,default",
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+
+                process.Start();
+                var output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                Log($"WMIC Output: {output}");
+
+                var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+                foreach (var line in lines)
+                {
+                    if (line.Contains("TRUE"))
+                    {
+                        var parts = line.Trim().Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length > 1)
+                        {
+                            var printerName = string.Join(" ", parts, 1, parts.Length - 1);
+                            Log($"Found default printer: {printerName}");
+                            return GetPrinterDetails(printerName);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error getting default printer: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        private dynamic GetPrinterDetails(string printerName)
+        {
+            try
+            {
+                var searcher = new ManagementObjectSearcher($"SELECT * FROM Win32_Printer WHERE Name = '{printerName}'");
 
                 foreach (var obj in searcher.Get())
                 {
@@ -397,7 +443,7 @@ namespace ComputerMonitorService
             }
             catch (Exception ex)
             {
-                Log($"Error getting default printer: {ex.Message}");
+                Log($"Error getting printer details for {printerName}: {ex.Message}");
             }
 
             return null;
